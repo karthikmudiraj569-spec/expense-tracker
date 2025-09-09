@@ -1,130 +1,132 @@
 import streamlit as st
-import sqlite3
+import psycopg2
+import os
+from datetime import date
 import hashlib
-import pandas as pd
 
-# ---------------------------
-# Database setup
-# ---------------------------
-conn = sqlite3.connect("expense.db", check_same_thread=False)
-c = conn.cursor()
+# ---------- DB CONNECTION ----------
+def get_connection():
+    return psycopg2.connect(
+        host=os.environ["DB_HOST"],
+        dbname=os.environ["DB_NAME"],
+        user=os.environ["DB_USER"],
+        password=os.environ["DB_PASS"],
+        port=os.environ["DB_PORT"]
+    )
 
-# Create tables if not exist
-def create_tables():
-    c.execute('''CREATE TABLE IF NOT EXISTS users (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    username TEXT UNIQUE,
-                    password TEXT)''')
-    
-    c.execute('''CREATE TABLE IF NOT EXISTS expenses (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id INTEGER,
-                    category TEXT,
-                    amount REAL,
-                    date TEXT,
-                    FOREIGN KEY(user_id) REFERENCES users(id))''')
+conn = get_connection()
+cursor = conn.cursor()
+
+# ---------- INIT DB ----------
+def init_db():
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS users (
+        id SERIAL PRIMARY KEY,
+        username VARCHAR(50) UNIQUE NOT NULL,
+        password VARCHAR(255) NOT NULL
+    );
+    """)
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS expenses (
+        id SERIAL PRIMARY KEY,
+        user_id INT REFERENCES users(id),
+        category VARCHAR(50),
+        amount NUMERIC,
+        date DATE,
+        description TEXT
+    );
+    """)
     conn.commit()
 
-create_tables()
+init_db()
 
-# ---------------------------
-# Helper functions
-# ---------------------------
+# ---------- HELPER FUNCTIONS ----------
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
 
-def add_user(username, password):
+def register_user(username, password):
     try:
-        c.execute("INSERT INTO users (username, password) VALUES (?, ?)",
-                  (username, hash_password(password)))
+        cursor.execute("INSERT INTO users (username, password) VALUES (%s, %s)", 
+                       (username, hash_password(password)))
         conn.commit()
         return True
-    except sqlite3.IntegrityError:
+    except:
         return False
 
 def login_user(username, password):
-    c.execute("SELECT * FROM users WHERE username=? AND password=?",
-              (username, hash_password(password)))
-    return c.fetchone()
+    cursor.execute("SELECT id, password FROM users WHERE username = %s", (username,))
+    result = cursor.fetchone()
+    if result and result[1] == hash_password(password):
+        return result[0]  # return user_id
+    return None
 
-def add_expense(user_id, category, amount):
-    c.execute("INSERT INTO expenses (user_id, category, amount, date) VALUES (?,?,?,DATE('now'))",
-              (user_id, category, amount))
+def add_expense(user_id, category, amount, exp_date, description):
+    cursor.execute(
+        "INSERT INTO expenses (user_id, category, amount, date, description) VALUES (%s, %s, %s, %s, %s)",
+        (user_id, category, amount, exp_date, description)
+    )
     conn.commit()
 
 def get_expenses(user_id):
-    c.execute("SELECT category, amount, date FROM expenses WHERE user_id=? ORDER BY date DESC",
-              (user_id,))
-    return c.fetchall()
+    cursor.execute("SELECT category, amount, date, description FROM expenses WHERE user_id = %s ORDER BY date DESC", (user_id,))
+    return cursor.fetchall()
 
-# ---------------------------
-# Streamlit App
-# ---------------------------
-st.title("💰 Expense Tracker with Login")
+# ---------- STREAMLIT APP ----------
+st.title("💰 Expense Tracker")
 
-# Sidebar menu
-menu = ["Login", "SignUp"]
+if "user_id" not in st.session_state:
+    st.session_state["user_id"] = None
+
+menu = ["Login", "Register"] if not st.session_state["user_id"] else ["Add Expense", "View Expenses", "Logout"]
 choice = st.sidebar.selectbox("Menu", menu)
 
-# ---------------------------
-# Sign Up
-# ---------------------------
-if choice == "SignUp":
-    st.subheader("Create a New Account")
+# ---------- LOGIN ----------
+if choice == "Login":
+    st.subheader("Login")
     username = st.text_input("Username")
     password = st.text_input("Password", type="password")
-    if st.button("Sign Up"):
-        if add_user(username, password):
-            st.success("Account created! ✅ Please go to Login.")
-        else:
-            st.error("⚠ Username already exists. Try another one.")
-
-# ---------------------------
-# Login
-# ---------------------------
-elif choice == "Login":
-    st.subheader("Login to Your Account")
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
-
     if st.button("Login"):
-        user = login_user(username, password)
-        if user:
-            st.session_state["user_id"] = user[0]
-            st.session_state["username"] = user[1]
-            st.success(f"Welcome, {st.session_state['username']}! 🎉")
+        user_id = login_user(username, password)
+        if user_id:
+            st.session_state["user_id"] = user_id
+            st.success(f"Welcome {username} 👋")
         else:
             st.error("Invalid username or password")
 
-# ---------------------------
-# Expense Tracker (only if logged in)
-# ---------------------------
-if "user_id" in st.session_state:
-    st.header("📊 Your Expense Dashboard")
+# ---------- REGISTER ----------
+elif choice == "Register":
+    st.subheader("Register")
+    username = st.text_input("Choose a Username")
+    password = st.text_input("Choose a Password", type="password")
+    if st.button("Register"):
+        if register_user(username, password):
+            st.success("Account created successfully! Please login.")
+        else:
+            st.error("Username already exists. Try another.")
 
-    # Add expense
-    with st.form("expense_form"):
-        category = st.text_input("Category")
-        amount = st.number_input("Amount", min_value=0.0, step=0.01)
-        submit = st.form_submit_button("Add Expense")
-        if submit and category and amount > 0:
-            add_expense(st.session_state["user_id"], category, amount)
-            st.success("✅ Expense added!")
+# ---------- ADD EXPENSE ----------
+elif choice == "Add Expense":
+    st.subheader("Add a New Expense")
+    category = st.selectbox("Category", ["Food", "Transport", "Shopping", "Bills", "Other"])
+    amount = st.number_input("Amount", min_value=0.0, step=0.01)
+    exp_date = st.date_input("Date", value=date.today())
+    description = st.text_area("Description")
 
-    # Show expenses
-    expenses = get_expenses(st.session_state["user_id"])
-    if expenses:
-        df = pd.DataFrame(expenses, columns=["Category", "Amount", "Date"])
-        st.subheader("📋 Your Expenses")
-        st.dataframe(df)
+    if st.button("Save Expense"):
+        add_expense(st.session_state["user_id"], category, amount, exp_date, description)
+        st.success("Expense added successfully ✅")
 
-        # Summary
-        st.subheader("📈 Expense Summary")
-        st.bar_chart(df.groupby("Category")["Amount"].sum())
+# ---------- VIEW EXPENSES ----------
+elif choice == "View Expenses":
+    st.subheader("Your Expenses")
+    rows = get_expenses(st.session_state["user_id"])
+    if rows:
+        for row in rows:
+            st.write(f"📌 {row[0]} - ₹{row[1]} on {row[2]} | {row[3]}")
     else:
-        st.info("No expenses added yet.")
+        st.info("No expenses yet. Add some!")
 
-    # Logout button
-    if st.button("Logout"):
-        st.session_state.clear()
-        st.success("You have logged out.")
+# ---------- LOGOUT ----------
+elif choice == "Logout":
+    st.session_state["user_id"] = None
+    st.success("You have been logged out.")
