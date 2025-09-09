@@ -1,146 +1,130 @@
-# app.py
-# Expense Tracker with Streamlit + SQLite
-# ---------------------------------------
-# Features:
-#  - Add expenses
-#  - View + filter + charts
-#  - Monthly budgets
-#  - Import/Export CSV
-# ---------------------------------------
-
 import streamlit as st
 import sqlite3
-from datetime import date, datetime
-from pathlib import Path
+import hashlib
 import pandas as pd
-import altair as alt
 
-# Database file
-DB_PATH = Path(__file__).with_name("expenses.db")
+# ---------------------------
+# Database setup
+# ---------------------------
+conn = sqlite3.connect("expense.db", check_same_thread=False)
+c = conn.cursor()
 
-# ---------------- Database Setup ----------------
+# Create tables if not exist
+def create_tables():
+    c.execute('''CREATE TABLE IF NOT EXISTS users (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    username TEXT UNIQUE,
+                    password TEXT)''')
+    
+    c.execute('''CREATE TABLE IF NOT EXISTS expenses (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    category TEXT,
+                    amount REAL,
+                    date TEXT,
+                    FOREIGN KEY(user_id) REFERENCES users(id))''')
+    conn.commit()
 
-def get_conn():
-    return sqlite3.connect(DB_PATH)
+create_tables()
 
-def init_db():
-    with get_conn() as conn:
-        conn.executescript(
-            """
-            CREATE TABLE IF NOT EXISTS categories (
-                id INTEGER PRIMARY KEY,
-                name TEXT UNIQUE NOT NULL
-            );
+# ---------------------------
+# Helper functions
+# ---------------------------
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
 
-            CREATE TABLE IF NOT EXISTS expenses (
-                id INTEGER PRIMARY KEY,
-                date TEXT NOT NULL,
-                amount REAL NOT NULL,
-                category_id INTEGER,
-                notes TEXT,
-                FOREIGN KEY (category_id) REFERENCES categories(id)
-            );
-            """
-        )
-        # Default categories
-        for cat in ["Food", "Transport", "Bills", "Shopping", "Other"]:
-            conn.execute("INSERT OR IGNORE INTO categories(name) VALUES (?)", (cat,))
+def add_user(username, password):
+    try:
+        c.execute("INSERT INTO users (username, password) VALUES (?, ?)",
+                  (username, hash_password(password)))
         conn.commit()
+        return True
+    except sqlite3.IntegrityError:
+        return False
 
-def get_categories():
-    with get_conn() as conn:
-        rows = conn.execute("SELECT name FROM categories ORDER BY name").fetchall()
-    return [r[0] for r in rows]
+def login_user(username, password):
+    c.execute("SELECT * FROM users WHERE username=? AND password=?",
+              (username, hash_password(password)))
+    return c.fetchone()
 
-def add_expense(d, amount, category, notes=""):
-    with get_conn() as conn:
-        cat_id = conn.execute("SELECT id FROM categories WHERE name=?", (category,)).fetchone()[0]
-        conn.execute(
-            "INSERT INTO expenses(date, amount, category_id, notes) VALUES (?,?,?,?)",
-            (d.isoformat(), float(amount), cat_id, notes),
-        )
-        conn.commit()
+def add_expense(user_id, category, amount):
+    c.execute("INSERT INTO expenses (user_id, category, amount, date) VALUES (?,?,?,DATE('now'))",
+              (user_id, category, amount))
+    conn.commit()
 
-def get_expenses(start=None, end=None, categories=None):
-    q = """
-        SELECT e.id, e.date, e.amount, c.name as category, e.notes
-        FROM expenses e
-        JOIN categories c ON e.category_id = c.id
-        WHERE 1=1
-    """
-    params = []
-    if start:
-        q += " AND date(e.date) >= date(?)"
-        params.append(start.isoformat())
-    if end:
-        q += " AND date(e.date) <= date(?)"
-        params.append(end.isoformat())
-    if categories:
-        q += f" AND c.name IN ({','.join(['?']*len(categories))})"
-        params.extend(categories)
+def get_expenses(user_id):
+    c.execute("SELECT category, amount, date FROM expenses WHERE user_id=? ORDER BY date DESC",
+              (user_id,))
+    return c.fetchall()
 
-    q += " ORDER BY date(e.date) DESC"
-    with get_conn() as conn:
-        df = pd.read_sql_query(q, conn, params=params)
-    df["Date"] = pd.to_datetime(df["date"]).dt.date
-    df.rename(columns={"amount":"Amount", "category":"Category", "notes":"Notes"}, inplace=True)
-    return df[["Date","Amount","Category","Notes"]]
+# ---------------------------
+# Streamlit App
+# ---------------------------
+st.title("💰 Expense Tracker with Login")
 
-# ---------------- UI ----------------
+# Sidebar menu
+menu = ["Login", "SignUp"]
+choice = st.sidebar.selectbox("Menu", menu)
 
-st.set_page_config(page_title="Expense Tracker", page_icon="💸", layout="wide")
-init_db()
+# ---------------------------
+# Sign Up
+# ---------------------------
+if choice == "SignUp":
+    st.subheader("Create a New Account")
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
+    if st.button("Sign Up"):
+        if add_user(username, password):
+            st.success("Account created! ✅ Please go to Login.")
+        else:
+            st.error("⚠ Username already exists. Try another one.")
 
-st.title("💸 Expense Tracker")
+# ---------------------------
+# Login
+# ---------------------------
+elif choice == "Login":
+    st.subheader("Login to Your Account")
+    username = st.text_input("Username")
+    password = st.text_input("Password", type="password")
 
-tabs = st.tabs(["➕ Add Expense", "📊 View & Analyze"])
+    if st.button("Login"):
+        user = login_user(username, password)
+        if user:
+            st.session_state["user_id"] = user[0]
+            st.session_state["username"] = user[1]
+            st.success(f"Welcome, {st.session_state['username']}! 🎉")
+        else:
+            st.error("Invalid username or password")
 
-# --- Add Expense Tab ---
-with tabs[0]:
-    st.subheader("Add a new expense")
-    with st.form("add_expense_form", clear_on_submit=True):
-        col1, col2, col3 = st.columns(3)
-        d = col1.date_input("Date", value=date.today())
-        amount = col2.number_input("Amount (₹)", min_value=0.0, step=10.0)
-        category = col3.selectbox("Category", get_categories())
-        notes = st.text_input("Notes (optional)")
-        submitted = st.form_submit_button("Add Expense")
-        if submitted:
-            if amount > 0:
-                add_expense(d, amount, category, notes)
-                st.success("Expense added!")
-            else:
-                st.error("Amount must be greater than 0.")
+# ---------------------------
+# Expense Tracker (only if logged in)
+# ---------------------------
+if "user_id" in st.session_state:
+    st.header("📊 Your Expense Dashboard")
 
-# --- View & Analyze Tab ---
-with tabs[1]:
-    st.subheader("Your Expenses")
+    # Add expense
+    with st.form("expense_form"):
+        category = st.text_input("Category")
+        amount = st.number_input("Amount", min_value=0.0, step=0.01)
+        submit = st.form_submit_button("Add Expense")
+        if submit and category and amount > 0:
+            add_expense(st.session_state["user_id"], category, amount)
+            st.success("✅ Expense added!")
 
-    today = date.today()
-    month_start = date(today.year, today.month, 1)
+    # Show expenses
+    expenses = get_expenses(st.session_state["user_id"])
+    if expenses:
+        df = pd.DataFrame(expenses, columns=["Category", "Amount", "Date"])
+        st.subheader("📋 Your Expenses")
+        st.dataframe(df)
 
-    col1, col2, col3 = st.columns([2,2,3])
-    start_d = col1.date_input("From", value=month_start)
-    end_d = col2.date_input("To", value=today)
-    cats = col3.multiselect("Categories", options=get_categories())
-
-    df = get_expenses(start_d, end_d, cats)
-
-    if df.empty:
-        st.info("No expenses found.")
+        # Summary
+        st.subheader("📈 Expense Summary")
+        st.bar_chart(df.groupby("Category")["Amount"].sum())
     else:
-        st.dataframe(df, use_container_width=True)
+        st.info("No expenses added yet.")
 
-        total = df["Amount"].sum()
-        st.metric("Total Spent", f"₹{total:,.2f}")
-
-        # Chart: Spend by category
-        by_cat = df.groupby("Category")["Amount"].sum().reset_index()
-        chart = alt.Chart(by_cat).mark_bar().encode(
-            x="Category", y="Amount", tooltip=["Category","Amount"]
-        )
-        st.altair_chart(chart, use_container_width=True)
-
-        # Export
-        csv = df.to_csv(index=False).encode("utf-8")
-        st.download_button("⬇️ Download CSV", data=csv, file_name="expenses.csv", mime="text/csv")
+    # Logout button
+    if st.button("Logout"):
+        st.session_state.clear()
+        st.success("You have logged out.")
