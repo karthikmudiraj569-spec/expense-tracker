@@ -1,13 +1,14 @@
 import streamlit as st
-import sqlite3
 import hashlib
 import pandas as pd
 
 # ---------------------------
 # Database setup
 # ---------------------------
-conn = sqlite3.connect("expense.db", check_same_thread=False)
-c = conn.cursor()
+import { createClient } from '@supabase/supabase-js'
+const supabaseUrl = 'https://cjwnasaierqbromttvbb.supabase.co'
+const supabaseKey = process.env.SUPABASE_KEY
+const supabase = createClient(supabaseUrl, supabaseKey)
 
 # Create tables if not exist
 def create_tables():
@@ -128,4 +129,5 @@ if "user_id" in st.session_state:
     if st.button("Logout"):
         st.session_state.clear()
         st.success("You have logged out.")
+
 
